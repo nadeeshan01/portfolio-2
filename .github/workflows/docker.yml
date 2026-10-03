@@ -142,6 +142,7 @@ jobs:
         continue-on-error: true   # report, don't block style-only PRs
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.74.0        # same release as the blocking publish scan
           image-ref: portfolio:pr-${{ github.event.pull_request.number }}
           format: table
           exit-code: "0"
@@ -269,23 +270,55 @@ jobs:
       # an upstream patch available, so an unpatchable base CVE can't hold the
       # pipeline hostage. `images` needs registry creds because the package may
       # still be private.
+      #
+      # This step is deliberately `format: table` with no `output:`, and that is
+      # the whole bug it replaces: trivy-action's entrypoint runs
+      # `unset TRIVY_SEVERITY` for any sarif run (so the report carries every
+      # severity), and that same filter decides the exit code. A "CRITICAL,HIGH"
+      # gate therefore blocked on MEDIUM and UNKNOWN findings — and showed
+      # nothing, because the results went to the file. Verified locally against
+      # the published digest: with the filter enforced, exit 0; without it,
+      # exit 1 on 1 MEDIUM (nghttp2 smuggling) + 1 UNKNOWN (libpng).
+      # Gating and reporting are separate steps now, each with the behaviour it
+      # actually wants.
       - name: Scan image for remediable CVEs
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # The action hard-codes its own default Trivy, which drifts behind the
+          # release the scan is reproduced with locally. Pin it, and let
+          # Dependabot move it deliberately.
+          version: v0.74.0
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          format: sarif
-          output: trivy-results.sarif
+          format: table
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
           vuln-type: os,library
 
-      # Runs even when the scan above failed — that's the whole point: you get
-      # the findings in the Security tab instead of a dead end in the log.
-      # Private repos need GitHub Advanced Security enabled for this to land.
+      # Full-severity SARIF for the Security tab: nothing hidden, nothing
+      # blocking. Runs even after the gate above fails — which is exactly when
+      # the findings are most wanted.
+      - name: Build the full-severity SARIF report
+        if: always()
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          version: v0.74.0
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      # Uploads whatever the report step produced. Private repos need GitHub
+      # Advanced Security for this to land; a public repo like this one does not.
       - name: Upload Trivy SARIF
         if: always()
         continue-on-error: true

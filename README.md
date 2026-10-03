@@ -202,6 +202,12 @@ manual approval (`node scripts/setup-security.mjs --reviewers <login> --apply`).
 `concurrency.group` is `production-deploy` with `cancel-in-progress: false` — a running
 release is never cancelled mid-swap.
 
+The scan gate runs in `table` format deliberately. trivy-action's entrypoint clears
+`TRIVY_SEVERITY` for any `sarif` run so the uploaded report is complete — and that
+same filter is what drives `--exit-code`, so a sarif-shaped gate blocks on MEDIUM and
+UNKNOWN findings while printing nothing to the log. Gating (HIGH/CRITICAL, fixable
+only, printed) and reporting (every severity, never blocking) are separate steps.
+
 ### Cutting a release
 
 ```bash
