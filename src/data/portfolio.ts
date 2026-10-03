@@ -208,7 +208,7 @@ export const PROJECTS: Project[] = [
     caseStudy: true,
     span: true,
     isNew: true,
-    repoUrl: 'https://github.com/nadeeshan01',
+    repoUrl: 'https://github.com/nadeeshan01/cloudpath-focusflow/tree/develop',
   },
   {
     index: '02',
