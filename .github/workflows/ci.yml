@@ -215,13 +215,46 @@ jobs:
 
       # Fails a PR only if it *introduces* a vulnerable dependency — pre-existing
       # advisories are Dependabot's job, not a block on unrelated work.
+      #
+      # This action does not read the checkout: it diffs two snapshots that
+      # GitHub's dependency graph keeps server-side, and npm has no client-side
+      # submission action, so the graph has to be enabled and built first (see
+      # the explainer step below). `license-check` and `vulnerability-check`
+      # already default to true — what has no default is a *policy*, which is why
+      # `allow-licenses` is the line that makes the license half real. The
+      # production tree today is MIT/ISC/0BSD, so this costs nothing to enforce.
+      # If a legitimate dependency fails on a compound SPDX expression
+      # ("(MIT OR CC0-1.0)"), add its identifier deliberately — a human making
+      # that call is the entire point of the gate.
       - name: Review changed dependencies
         if: github.event_name == 'pull_request'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
-          license-checking: true
-          vulnerability-check: true
+          fail-on-scopes: runtime
+          allow-licenses: MIT, ISC, 0BSD, BSD-2-Clause, BSD-3-Clause, Apache-2.0, BlueOak-1.0.0, CC0-1.0, Unlicense, Python-2.0, Zlib
+
+      # The action's own failure text ("Dependency review is not supported on
+      # this repository") names no remedy, so put one next to the red X. The gate
+      # deliberately stays blocking: a check that quietly passes when it could not
+      # run is not a check. Advisory coverage is not lost either way — the
+      # `npm audit` step below needs no graph.
+      - name: Explain a dependency-review failure
+        if: ${{ failure() && github.event_name == 'pull_request' }}
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo '### dependency review could not diff these revisions'
+            echo ''
+            echo 'If the log says *"not supported on this repository"*, the dependency graph is'
+            echo 'off or still being built. In order:'
+            echo "1. https://github.com/$REPO/settings/security_analysis — enable **Dependency graph**"
+            echo "2. https://github.com/$REPO/network/dependencies — wait until it lists packages"
+            echo '3. push again (the extractor only sees a revision after a push), then re-run this job'
+            echo ''
+            echo 'Everything else in this job still ran: `npm audit` covers advisories without a graph.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: npm audit (production tree only)
         # devDependencies never ship in the image (multi-stage build), so only the

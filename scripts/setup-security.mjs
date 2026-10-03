@@ -240,6 +240,31 @@ async function main() {
     console.log('  (verified for real once --apply runs with a token)')
   }
 
+  // ---- 5. dependency graph --------------------------------------------------
+  // actions/dependency-review-action diffs snapshots that GitHub's server-side
+  // extractor stores per revision; npm has no client-side submission action, so
+  // the only way to populate it is to enable the feature and push. Until then
+  // the gate fails with an error that names no remedy. Asked with a token, the
+  // SBOM endpoint is a real signal — unauthenticated it answers 200 with zero
+  // packages for every repo, healthy or not, which is why this is report-only
+  // and lives here rather than in the workflow.
+  console.log('\n5. Dependency graph (required by the dependency-review gate)')
+  if (TOKEN) {
+    const sbom = await gh('GET', `/repos/${repo}/dependency-graph/sbom`)
+    const count = sbom.ok ? Object.keys(sbom.json.packages || {}).length : -1
+    if (count > 0) {
+      console.log(`  ok    ${count} packages in the graph for ${defaultBranch}`)
+    } else if (count === 0) {
+      console.log(`  EMPTY nothing built yet — dependency review will fail on every PR.`)
+      console.log(`        https://github.com/${repo}/settings/security_analysis then /network/dependencies`)
+    } else {
+      console.log(`  ?     endpoint returned ${sbom.status} (graph may be off, or the token lacks rights)`)
+    }
+  } else {
+    console.log('  note: no token, so this cannot be checked. It is a UI-only setting;')
+    console.log(`        https://github.com/${repo}/settings/security_analysis`)
+  }
+
   console.log('\nnext:')
   console.log('  1. Re-run with --apply to write these settings.')
   console.log('  2. Add the SSH_* secrets and DEPLOY_DIR/SITE_URL variables (README “Server one-time setup”).')

@@ -182,11 +182,11 @@ radius.
 
 | Job | Turns red when |
 | --- | --- |
-| **typecheck + build** | strict `tsc` fails, or `dist/` has no hashed JS/CSS chunk, or it contains `.map` / `.env*` files that would ship to the public dir |
+| **typecheck + build** | strict `tsc` fails, `dist/` has no hashed JS/CSS chunk or no `portrait.jpg`, or it contains `.map` / `.env*` files that would ship to the public dir |
 | **site audit (4 breakpoints)** | the real production bundle logs console or page errors, or overflows horizontally, at 4 viewport widths (`STRICT=1 node scripts/audit.mjs`) |
 | **secret scan (full history)** | gitleaks finds a credential in *any* commit — a key deleted later is still leaked |
 | **CodeQL (JS/TS + Actions)** | data-flow analysis flags the app source **or the workflow files themselves** (injection via `${{ }}` interpolation) |
-| **dependency advisories** | a PR introduces a vulnerable package, `npm audit --omit=dev` reports High/Critical in the tree that actually ships, or an action pin doesn't match the commit its version comment names |
+| **dependency advisories** | a PR introduces a vulnerable package or a license outside `allow-licenses`, `npm audit --omit=dev` reports High/Critical in the tree that actually ships, or an action pin doesn't match the commit its version comment names. Needs the repo's **dependency graph** enabled (Settings → Code, security and analysis) — npm has no client-side snapshot upload, so until GitHub's extractor has run, this job fails with the remedy printed in its summary |
 | **config + IaC scan** | Trivy finds a High/Critical misconfiguration in the Dockerfile, or either compose file fails to resolve against the schema |
 
 ### `docker.yml` — build → scan → sign → publish → release
