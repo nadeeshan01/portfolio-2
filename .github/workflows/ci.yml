@@ -1,0 +1,269 @@
+name: ci
+
+# ============================================================================
+# Every pull request and every push to main must clear these gates before the
+# deploy job in docker.yml is allowed to touch production.
+#
+# Security layers here, in rough order of how often they catch things:
+#   secret-scan  gitleaks over full git history — leaked keys can't be un-leaked
+#   sast         CodeQL data-flow analysis over JS/TS and the workflow files
+#   deps         advisory check on changed requirements + prod-only npm audit
+#                plus a check that every action pin matches its version comment
+#   iaC          Trivy misconfig scan of the Dockerfile + compose schema check
+#   build        strict TypeScript, then a real production bundle
+#   site-audit   the built page rendered in Chrome at 4 widths, failing on
+#                console errors, thrown errors and horizontal overflow
+#
+# All third-party actions are pinned to full commit SHAs (not mutable tags),
+# and every job declares the least privileges it needs. Refresh pins with
+# Dependabot (see .github/dependabot.yml), which understands SHA pins.
+#
+# NOTE: on a PRIVATE repo, CodeQL and secret scanning require GitHub Advanced
+# Security. Set `continue-on-error: true` on the sast job if you don't have it.
+# ============================================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # --------------------------------------------------------------------------
+  build:
+    name: typecheck + build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # `ci` not `install`: a lockfile drift fails loudly instead of editing it.
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck (strict)
+        run: npm run typecheck
+
+      - name: Production build
+        run: npm run build
+
+      - name: Confirm the bundle is self-contained
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          # A hashed JS + CSS chunk must exist, or the image would serve a blank page.
+          find dist/assets -name '*.js' | grep -q .
+          find dist/assets -name '*.css' | grep -q .
+          # public/ must have been copied in (the Dockerfile has to COPY it too).
+          # The dev server masks a missing file here; a browser tab just shows a
+          # blank icon, so assert it in the artifact instead.
+          test -f dist/portrait.jpg
+          grep -q 'rel="icon"' dist/index.html
+          # No source maps or stray dotfiles should ever reach the public dir.
+          if find dist -name '*.map' -o -name '.env*' | grep -q .; then
+            echo "dist/ contains source maps or dotfiles" >&2
+            exit 1
+          fi
+          du -sh dist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist
+          retention-days: 1
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Renders the actual production bundle in headless Chrome and fails the build
+  # on console errors, thrown exceptions or horizontal overflow. Catches the
+  # class of regression that typechecking cannot see.
+  site-audit:
+    name: site audit (4 breakpoints)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist
+
+      - name: Serve the production bundle
+        run: |
+          npx vite preview --port 4173 --host 127.0.0.1 > preview.log 2>&1 &
+          echo "$!" > preview.pid
+          # Poll instead of sleeping blindly; keep the server running for the
+          # next step (do NOT `exit 0` here — that would take the process down).
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4173/ >/dev/null 2>&1; then ready=1; break; fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+            cat preview.log
+            exit 1
+          fi
+
+      - name: Audit console, overflow and fonts
+        env:
+          STRICT: '1'
+          URL: http://127.0.0.1:4173/
+        run: node scripts/audit.mjs
+
+      - name: Stop preview server
+        if: always()
+        run: kill "$(cat preview.pid)" 2>/dev/null || true
+
+  # --------------------------------------------------------------------------
+  # Secrets in git history, not just the working tree — a key removed in a later
+  # commit is still a leaked key.
+  secret-scan:
+    name: secret scan (full history)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Pinned image rather than gitleaks-action: the action needs a licence
+      # secret for private/org repos, the CLI image does not. v8.24.0.
+      - name: gitleaks
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/repo" \
+            -w /repo \
+            ghcr.io/gitleaks/gitleaks@sha256:2bcceac45179b3a91bff11a824d0fb952585b429e54fc928728b1d4d5c3e5176 \
+            detect --source=/repo --redact --exit-code 1 \
+              --report-format sarif --report-path /repo/gitleaks.sarif
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: gitleaks-sarif
+          path: gitleaks.sarif
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  sast:
+    name: CodeQL (JS/TS + Actions)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: javascript-typescript, actions
+          # Neither language needs an instrumented build; analysis runs on source.
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: '/language:javascript-typescript'
+
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: '/language:actions'
+
+  # --------------------------------------------------------------------------
+  deps:
+    name: dependency advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Fails a PR only if it *introduces* a vulnerable dependency — pre-existing
+      # advisories are Dependabot's job, not a block on unrelated work.
+      - name: Review changed dependencies
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          license-checking: true
+          vulnerability-check: true
+
+      - name: npm audit (production tree only)
+        # devDependencies never ship in the image (multi-stage build), so only the
+        # production tree can put a vulnerable file in front of users.
+        run: npm audit --omit=dev --audit-level=high
+
+      # Pinning by SHA only protects anything if the SHA is the commit the
+      # `# vX.Y.Z` comment claims. Verified with `git ls-remote` — no token, no
+      # rate limit — so a retargeted or mis-copied pin fails here instead of
+      # running someone else's code with `packages: write`.
+      - name: Verify action pins
+        run: node scripts/pins.mjs --quiet
+
+  # --------------------------------------------------------------------------
+  # Configuration-layer checks: the misconfig scanner's view of the build files,
+  # plus a compose schema resolve. Compose typos are invisible until `up` fails
+  # on the production host, which is exactly when you least want to meet them.
+  # (Trivy's misconfig DB covers Dockerfiles and k8s/Terraform; it does not read
+  # compose or nginx, so the schema resolve below is what covers compose.)
+  iaC:
+    name: config + IaC scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read   # report only — findings print to the job log
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate compose schema (base + TLS overlay)
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.tls.yml config --quiet
+
+      # No `ignore-unfixed` here: that flag belongs to vulnerability scanning.
+      # `trivy config` rejects it outright ("unknown flag"), which would fail
+      # this job with a usage error instead of a finding.
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          exit-code: '1'
+          severity: HIGH,CRITICAL
+          format: table
+          trivyignores: .trivyignore

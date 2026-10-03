@@ -18,6 +18,10 @@ scratch/
 *.local
 *.pid
 
+# Scanner output — CI uploads these as artifacts/SARIF; committing them would
+# freeze a snapshot of findings as if it were current.
+*.sarif
+
 # Editor & OS
 .vscode/*
 !.vscode/extensions.json

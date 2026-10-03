@@ -3,8 +3,10 @@ import { motion, useMotionValue, useReducedMotion, useSpring, useTransform } fro
 import { IDENTITY } from '../data/portfolio'
 import { EASE } from './Reveal'
 
-const PORTRAIT_SRC =
-  'https://lh3.googleusercontent.com/aida-public/AB6AXuBgVHS6KUAWJUYNJkN00-Sq6TBAl7Nr-dhlUko1hvDZ6vO1yWYSrJsjgIrcet2HCjMpaH4i3NzKfLITmMosBXn8ASlqkv3LnEZFvA38w_SKSroLW9lRaXfVG9n9nG_lO-8nUFYK5GVKYuM3YY6wHEoHyb6xqEAJhEagQPSrrdC8xgO_TXPkB9TF7IfXxDkkoxC-uBnJAYB5-TAe-Tnsk36YGn64qsHXg_CP8FD_n5_E6qOpVKfK9pPIaqdY15jzL_6LI6M'
+// Portrait is vendored into public/ so it ships inside the image: same-origin
+// (CSP `img-src 'self'`), no dependence on a third-party URL that can expire,
+// and no extra origin that has to be allow-listed for every visitor.
+const PORTRAIT_SRC = '/portrait.jpg'
 
 /** Engraved stand-in plate used if the portrait fails to load. */
 function PortraitFallback() {

@@ -34,6 +34,10 @@ RUN --mount=type=cache,target=/root/.npm \
 # Build inputs — only what `tsc -b && vite build` actually reads.
 COPY tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts index.html ./
 COPY src ./src
+# Vite copies publicDir into dist/ verbatim. Skipping this is the quiet failure:
+# the dev server serves public/ from disk so it looks fine locally, while the
+# image 404s — and the SPA fallback turns that into a 200 text/html for an image.
+COPY public ./public
 
 RUN --mount=type=cache,target=/root/.npm npm run build
 
@@ -46,6 +50,14 @@ RUN --mount=type=cache,target=/root/.npm npm run build
 # so `docker buildx --platform linux/arm64` still resolves against this pin.
 # Refresh with:  docker buildx imagetools inspect nginxinc/nginx-unprivileged:alpine
 FROM nginxinc/nginx-unprivileged:alpine@sha256:26b0bf6fbf07297983cb341998d79c831508787de26627dd2a112321b9c3a4af AS runner
+
+# The pinned base carries pcre2 10.48-r0 (CVE-2026-103111, out-of-bounds write).
+# Alpine's v3.24 repo already has the fixed 10.49-r0, so take it here — ahead of
+# the ARGs — and this layer stays cached across version bumps. Dropping to root
+# only for the package manager; the image still ships as UID 101 below.
+USER root
+RUN apk upgrade --no-cache pcre2
+USER 101
 
 ARG BUILD_DATE
 ARG GIT_SHA=dev
