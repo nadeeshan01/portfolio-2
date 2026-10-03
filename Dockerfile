@@ -20,12 +20,16 @@
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS builder
 
 WORKDIR /app
-ENV NODE_ENV=production
+
+# Do NOT set NODE_ENV=production here. npm ci omits devDependencies when
+# NODE_ENV=production, and the entire build toolchain (typescript, vite,
+# tailwind) lives in devDependencies — the build dies with `sh: tsc: not found`.
+# `--include=dev` also pins the intent against any ambient CI environment.
 
 # Dependency layer first: rebuilds only when the lockfile changes.
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --no-audit --no-fund
+    npm ci --include=dev --no-audit --no-fund
 
 # Build inputs — only what `tsc -b && vite build` actually reads.
 COPY tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts index.html ./
