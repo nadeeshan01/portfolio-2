@@ -1,0 +1,113 @@
+# ============================================================================
+# Editorial DevOps Portfolio — production compose
+#
+# Local / direct exposure:
+#   docker compose up -d --build              → http://localhost:8080
+#
+# Public TLS edge (Caddy issues + renews certs, only Caddy publishes 80/443):
+#   cp deploy/Caddyfile.example deploy/Caddyfile   # set your real hostname
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# Deploy the immutable image built by .github/workflows/docker.yml:
+#   IMAGE=ghcr.io/<owner>/<repo>:<short-sha> docker compose up -d --pull always
+#   docker compose logs -f portfolio
+#   docker compose down --remove-orphans
+#
+# Hardening: non-root, read-only rootfs, all capabilities dropped, no privilege
+# escalation, seccomp left on, bounded logs and resources.
+# ============================================================================
+
+name: editorial-devops-portfolio
+
+services:
+  portfolio:
+    # Defaults to a local build; point at GHCR for deploys (immutable SHA tag).
+    image: ${IMAGE:-editorial-devops-portfolio:local}
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Metadata for OCI labels baked into the image.
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+        VERSION: ${VERSION:-dev}
+        BUILD_DATE: ${BUILD_DATE:-}
+        SOURCE: ${SOURCE:-}
+
+    container_name: portfolio
+
+    ports:
+      # HOST:CONTAINER — container listens on 8080 (unprivileged, no root).
+      # `docker-compose.tls.yml` !reset-s this to nothing so only Caddy is
+      # reachable from outside; plain `docker compose up` keeps it open.
+      - "${PORT:-8080}:8080"
+
+    # Internal-only service address used by the Caddy overlay.
+    expose:
+      - "8080"
+
+    # The image already declares USER 101; restated so an accidental base swap
+    # can't silently start the task as root.
+    user: "101:101"
+
+    restart: unless-stopped
+
+    # --- filesystem ----------------------------------------------------------
+    read_only: true
+    tmpfs:
+      # nginx writes its pid + temp caches; nothing else needs to be writable.
+      - /tmp:size=16m,mode=1777
+      - /var/cache/nginx:size=32m,mode=1777
+      - /var/run:size=8m,mode=1777
+
+    # --- kernel / privileges -------------------------------------------------
+    cap_drop:
+      - ALL          # static file server needs no capabilities at all
+    security_opt:
+      # Root can never be gained after start, and Docker's default seccomp
+      # profile stays applied (only ~70 syscalls reachable by nginx workers).
+      - no-new-privileges:true
+    privileged: false
+
+    # --- resources -----------------------------------------------------------
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 96M
+          pids: 64           # nginx master + a handful of workers, nothing more
+        reservations:
+          cpus: "0.05"
+          memory: 32M
+
+    # --- lifecycle -----------------------------------------------------------
+    stop_grace_period: 15s
+    oom_score_adj: 500      # shed this container before the host's critical procs
+    init: true
+
+    # --- observability -------------------------------------------------------
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        # Without this, a chatty nginx access log fills the host disk.
+        max-size: "10m"
+        max-file: "3"
+
+    networks:
+      - web
+
+    labels:
+      # Carries the built commit through to `docker ps` / inspection dashboards.
+      org.opencontainers.image.title: "editorial-devops-portfolio"
+      org.opencontainers.image.revision: "${GIT_SHA:-dev}"
+
+networks:
+  web:
+    driver: bridge

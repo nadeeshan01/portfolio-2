@@ -16,6 +16,7 @@ preview.log
 # Local tooling / temp
 scratch/
 *.local
+*.pid
 
 # Editor & OS
 .vscode/*
@@ -23,8 +24,15 @@ scratch/
 .idea/
 .DS_Store
 Thumbs.db
+Desktop.ini
 
-# Env files
+# Secrets & machine-specific values
 .env
 .env.*
+
+# The filled-in Caddyfile holds your real hostname and stays local; templates
+# are committed. Negations must come after the patterns they re-include.
+deploy/Caddyfile
+*.example
 !.env.example
+!deploy/Caddyfile.example

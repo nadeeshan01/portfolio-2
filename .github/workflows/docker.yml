@@ -1,0 +1,303 @@
+name: docker
+
+# ============================================================================
+# Build → scan → publish the portfolio image to GHCR.
+#
+# Auth: GITHUB_TOKEN is pre-authorized for Packages on the same repo, so there
+# are no extra secrets to rotate (needs `packages: write` permission below).
+#
+# Tags produced:
+#   ghcr.io/<owner>/<repo>:<short-sha>   immutable, one per commit  ← deploy this
+#   ghcr.io/<owner>/<repo>:sha-<full-sha> immutable, same commit
+#   ghcr.io/<owner>/<repo>:main          moving, branch head
+#   ghcr.io/<owner>/<repo>:1.2.3         semver, only for tagged releases
+#   ghcr.io/<owner>/<repo>:latest        moves ONLY on a v* tag — branch pushes
+#                                         never touch it, so it can't drift to a
+#                                         half-reviewed state.
+#
+# Supply chain: Trivy gates the publish on CRITICAL/HIGH CVEs that have an
+# upstream fix (`ignore-unfixed`), and SARIF findings land in the Security tab.
+# Base images are digest-pinned in the Dockerfile, so Dependabot
+# (.github/dependabot.yml) is what proposes new digests — the weekly rebuild
+# alone cannot pick up patched bases.
+#
+# First push creates the package as PRIVATE. Flip it to public (package
+# settings → "Make public") if unauthenticated nodes must pull it, or use
+# `docker login ghcr.io` on the host with any PAT that has read:packages.
+# ============================================================================
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Rebuild weekly at 04:10 UTC so base-image CVE fixes roll in automatically.
+    - cron: "10 4 * * 1"
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write      # push to GHCR with the built-in token
+  actions: read        # attestations / provenance lookups
+  security-events: write   # upload Trivy SARIF to the Security tab
+
+env:
+  REGISTRY: ghcr.io
+  # GHCR rejects uppercase in image names — lowercased in a step, used everywhere.
+  BASE_IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # --------------------------------------------------------------------------
+  # PR gate: single-arch build, boot it, assert it actually serves.
+  # --------------------------------------------------------------------------
+  smoke:
+    if: github.event_name == 'pull_request'
+    name: build & smoke test (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up BuildKit
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image into the local daemon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true                    # single platform only — no manifest list
+          tags: portfolio:pr-${{ github.event.pull_request.number }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            VERSION=pr
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=smoke
+          cache-to: type=gha,mode=min,scope=smoke
+
+      - name: Run with production-grade restrictions
+        run: |
+          docker run -d --rm \
+            --name portfolio-pr \
+            --user 101:101 \
+            --read-only \
+            --tmpfs /tmp:size=16m \
+            --tmpfs /var/cache/nginx:size=32m \
+            --tmpfs /var/run:size=8m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -p 8080:8080 \
+            portfolio:pr-${{ github.event.pull_request.number }}
+
+      - name: Assert health, SPA fallback and headers
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break
+            sleep 2
+            [ "$i" -eq 20 ] && { docker logs portfolio-pr; exit 1; }
+          done
+
+          # Root document must be the built shell, hashed bundle must exist.
+          html=$(curl -fsS http://127.0.0.1:8080/)
+          grep -q '<div id="root">' <<<"$html"
+          asset=$(grep -o '/assets/[A-Za-z0-9._-]*\.js' <<<"$html" | head -1)
+          curl -fsS -o /dev/null "http://127.0.0.1:8080${asset}"
+
+          # Deep link must resolve to the SPA shell, not a 404.
+          [ "$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/any/deep/route)" = "200" ]
+
+          # Security headers must be present on every response shape.
+          curl -fsSI http://127.0.0.1:8080/ | grep -i 'content-security-policy'
+          curl -fsSI http://127.0.0.1:8080/ | grep -i 'x-content-type-options: nosniff'
+
+          # Hashed bundle: one-year immutable, but still headered.
+          asset_head=$(curl -fsSI "http://127.0.0.1:8080${asset}")
+          grep -qi 'cache-control:.*immutable' <<<"$asset_head"
+          grep -qi 'content-security-policy' <<<"$asset_head"
+
+          # Document root must revalidate so deploys aren't stuck on stale shells.
+          curl -fsSI http://127.0.0.1:8080/ | grep -qi 'cache-control:.*must-revalidate'
+
+          # Dotfiles must be refused.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/.env)" != "200" ]
+          echo "container user: $(docker inspect -f '{{.Config.User}}' portfolio-pr)"
+
+      - name: Scan for known CVEs in the final image
+        if: always()
+        continue-on-error: true   # report, don't block style-only PRs
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: portfolio:pr-${{ github.event.pull_request.number }}
+          format: table
+          exit-code: "0"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true    # same policy as the blocking publish scan
+          vuln-type: os,library
+
+      - name: Teardown
+        if: always()
+        run: docker stop portfolio-pr || true
+
+  # --------------------------------------------------------------------------
+  # main / tags / cron: multi-arch publish with immutable tags + attestations.
+  # --------------------------------------------------------------------------
+  publish:
+    if: github.event_name != 'pull_request'
+    name: multi-platform publish
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # arm64 (Apple Silicon, AWS Graviton) images need a qemu binfmt handler;
+      # buildx then emits one manifest list covering both architectures.
+      - name: Enable cross-arch emulation
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up BuildKit
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute lowercase image name
+        run: |
+          echo "IMAGE_NAME=$(echo "${BASE_IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      # GITHUB_TOKEN authenticates to GHCR automatically — nothing stored.
+      # The same token works for scheduled runs, so weekly rebuilds can publish.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (immutable + moving tags)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Immutable: every build traceable to an exact commit.
+            type=sha,prefix=,format=short
+            type=sha,prefix=sha-,format=long
+            # Branch pointer.
+            type=ref,event=branch
+            type=ref,event=pr
+            # Releases: v1.2.3 → 1.2.3, 1.2, 1
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # `latest` advances only on a version tag, never on a branch push:
+            # deploying :latest then always means a reviewed release.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=editorial-devops-portfolio
+          annotations: |
+            org.opencontainers.image.description=React + Vite editorial DevOps portfolio on unprivileged nginx
+
+      # Push the immutable, commit-scoped tags FIRST. Nothing moving depends on
+      # this build until the scan below says the image is remediable-clean.
+      - name: Build and push immutable SHA tags (amd64, arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.SHORT_SHA }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
+          # Layer cache across runs; scope keeps PR/main caches from evicting each other.
+          cache-from: type=gha,scope=publish
+          cache-to: type=gha,mode=max,scope=publish
+          # Provenance + SBOM make the pushed digest auditable (slsa provenance).
+          provenance: mode=max
+          sbom: true
+
+      # Scan the pushed digest rather than a local copy — the multi-platform
+      # build was pushed, not loaded, and this is the exact artifact that got
+      # written to the registry. Trivy resolves the index to amd64 by default.
+      #
+      # exit-code 1 + ignore-unfixed: the build only fails on findings that have
+      # an upstream patch available, so an unpatchable base CVE can't hold the
+      # pipeline hostage. `images` needs registry creds because the package may
+      # still be private.
+      - name: Scan image for remediable CVEs
+        uses: aquasecurity/trivy-action@0.28.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      # Runs even when the scan above failed — that's the whole point: you get
+      # the findings in the Security tab instead of a dead end in the log.
+      # Private repos need GitHub Advanced Security enabled for this to land.
+      - name: Upload Trivy SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
+
+      # Only a clean scan reaches the moving tags, so `:main` and `:latest`
+      # can never point at an image the pipeline rejected. Re-invoking the build
+      # is cheap: every layer is a cache hit, so just new manifests are pushed.
+      - name: Promote to branch and release tags
+        if: success()
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=publish
+          provenance: mode=max
+          sbom: true
+
+      - name: Summary
+        run: |
+          {
+            echo "## Image published"
+            echo ""
+            echo '- **Digest:** `${{ steps.build.outputs.digest }}`'
+            echo '- **Platforms:** linux/amd64, linux/arm64'
+            echo '- **Trivy:** no fixable CRITICAL/HIGH findings'
+            echo ""
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo ""
+            echo "Deploy the immutable tag:"
+            echo '```bash'
+            echo "IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.SHORT_SHA }} docker compose up -d --pull always"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

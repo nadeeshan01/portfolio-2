@@ -1,0 +1,50 @@
+# ============================================================================
+# Base images in the Dockerfile are pinned by digest, so they never move on
+# their own — the weekly cron rebuild reuses the same patched-out digest.
+# Dependabot is what opens the PR that carries a newer digest, and the docker
+# workflow then builds + scans + promotes it.
+# ============================================================================
+
+version: 2
+
+updates:
+  # FROM lines in ./Dockerfile (tag + @sha256 digest are updated together).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:30"
+      timezone: UTC
+    groups:
+      base-images:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Keep action versions current (checkout, buildx, metadata, trivy, codeql).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:30"
+      timezone: UTC
+
+  # App dependencies — grouped so a batch of transitive bumps is one PR, and
+  # capped so a noisy lockfile can't bury the container PRs.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:30"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    groups:
+      prod-deps:
+        dependency-type: production
+      dev-deps:
+        dependency-type: development
