@@ -125,7 +125,7 @@ export default function IdPass() {
                 alt={`${IDENTITY.name} — staff pass portrait`}
                 loading="lazy"
                 onError={() => setFailed(true)}
-                className="h-full w-full object-cover grayscale contrast-[1.08] brightness-[0.97]"
+                className="h-full w-full object-cover saturate-[1.05] sepia-[0.18] contrast-[1.06] brightness-[1.02]"
                 style={{ objectPosition: '50% 14%' }}
               />
             )}

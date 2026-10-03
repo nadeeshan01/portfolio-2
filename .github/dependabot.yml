@@ -1,30 +1,24 @@
 # ============================================================================
-# Base images in the Dockerfile are pinned by digest, so they never move on
-# their own — the weekly cron rebuild reuses the same patched-out digest.
-# Dependabot is what opens the PR that carries a newer digest, and the docker
-# workflow then builds + scans + promotes it.
+# Two ecosystems, both weekly on Monday, so a burst of advisories arrives as
+# one reviewable batch rather than a drip:
+#
+#   github-actions  every action pin in .github/workflows. They are full-SHA
+#                   pins carrying a `# vX.Y.Z` comment, and scripts/pins.mjs
+#                   fails CI when the SHA and the tag disagree — Dependabot is
+#                   what keeps both moving together.
+#   npm             app dependencies, grouped prod/dev and capped so a noisy
+#                   lockfile can't bury anything.
+#
+# The `docker` ecosystem went away with the Dockerfile: there are no base-image
+# digests left to bump, and Netlify owns the runtime now.
 # ============================================================================
 
 version: 2
 
 updates:
-  # FROM lines in ./Dockerfile (tag + @sha256 digest are updated together).
-  - package-ecosystem: docker
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-      time: "04:30"
-      timezone: UTC
-    groups:
-      base-images:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
 
-  # Keep action versions current (checkout, buildx, metadata, trivy, codeql).
+
+  # Keep action pins current (checkout, setup-node, artifacts, codeql).
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -34,7 +28,7 @@ updates:
       timezone: UTC
 
   # App dependencies — grouped so a batch of transitive bumps is one PR, and
-  # capped so a noisy lockfile can't bury the container PRs.
+  # capped so a noisy lockfile can't bury anything else.
   - package-ecosystem: npm
     directory: /
     schedule:

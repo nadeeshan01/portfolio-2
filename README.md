@@ -71,14 +71,10 @@ node scripts/audit.mjs   # console errors, horizontal overflow, font check at 4 
 ```
 src/                    React app (App.tsx · index.css · data/ · lib/ · components/)
 public/                 portrait.jpg — staff-pass photo *and* browser-tab icon
-Dockerfile              two-stage build → unprivileged nginx (UID 101, :8080)
-docker-compose.yml      hardened runtime
-                        (+ docker-compose.tls.yml for the Caddy HTTPS edge)
-deploy/                 nginx.conf · security-headers.conf · Caddyfile.example
+netlify.toml            build command · SPA fallback · security headers · asset caching
 scripts/                headless verification harness
-.github/workflows/      ci.yml (gates) · docker.yml (publish + release)
+.github/workflows/      ci.yml — every gate below. Netlify does the build + deploy.
 .github/                SECURITY.md · dependabot.yml
-.trivyignore            documented image/config scan suppressions (empty by default)
 ```
 
 ## Verification scripts
@@ -90,85 +86,77 @@ node scripts/linkcheck.mjs      # every rendered href resolves (no relative link
 node scripts/shoot.mjs          # section screenshots → shots/
 node scripts/shoot-case.mjs     # dossier screenshots (desktop + mobile)
 node scripts/verify-deck.mjs    # command-deck tabs + clipboard assertions
-node scripts/digests.mjs        # check the Dockerfile digest pins (--write to refresh)
 node scripts/pins.mjs           # every action pin vs the upstream tag it claims
 node scripts/setup-security.mjs # dry-run the GitHub repo settings; --apply to write them
 ```
 
-## Container & deploy runbook
+## Deploy runbook (Netlify)
 
-### Build and run locally
-
-```bash
-docker compose up -d --build                 # → http://localhost:8080
-curl -i http://localhost:8080/healthz        # 200 ok + security headers
-docker compose logs -f portfolio
-docker compose down --remove-orphans
-```
-
-Base images are **pinned by digest** in the `Dockerfile` (`node:22-alpine`,
-`nginxinc/nginx-unprivileged:alpine`), so a rebuild is byte-reproducible. Digests
-only move when Dependabot opens the bump PR — the weekly cron rebuild alone will
-not pick up upstream base patches. `node scripts/digests.mjs` reports drift, and
-`--write` repins in place (it covers the Dockerfile only; the Caddy pin in
-`docker-compose.tls.yml` is refreshed with `docker buildx imagetools inspect caddy:2-alpine`).
-
-### Publish and deploy
-
-`.github/workflows/docker.yml` pushes to GHCR with `GITHUB_TOKEN` (no stored secret),
-for `linux/amd64` + `linux/arm64`. Immutable SHA tags are pushed first; `:main` and
-`:latest` are promoted **only after** the Trivy gate passes, so a moving tag can never
-point at a rejected image. Reaching production additionally requires a `v*` tag, a
-verified cosign signature and (if configured) a human approval — see **Pipelines** below.
+### Build and preview locally
 
 ```bash
-# Deploy an exact commit (preferred)
-IMAGE=ghcr.io/<owner>/<repo>:<short-sha> docker compose up -d --pull always
-
-# TLS edge: Caddy issues/renews certs and is the only published port
-cp deploy/Caddyfile.example deploy/Caddyfile   # set your real hostname
-docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --pull always
+npm run dev             # http://localhost:5173
+npm run build           # tsc -b && vite build → dist/
+npm run preview         # serve the production build on :4173
+node scripts/audit.mjs  # the same check CI gates on
 ```
+
+`netlify.toml` is the whole deployment surface. It declares `npm ci … && npm run build`
+and `publish = "dist"`, plus the two things that used to live in `deploy/nginx.conf`:
+
+- **SPA fallback** — `/* → /index.html 200`, a rewrite (not a redirect) so deep links
+  keep their URL for the client router. It sits *below* `/assets/* → 404`, so a hashed
+  bundle that no longer exists stays a 404 instead of being handed to the browser as
+  JavaScript.
+- **Security headers** — CSP, `frame-ancestors`, `nosniff`, referrer policy,
+  permissions policy, all carried over from the old nginx snippet, plus **HSTS**, which
+  nginx deliberately left off because the Caddy edge set it. There is no edge of our
+  own any more, so HSTS is the one header that changed value rather than address.
+  Documents get `Cache-Control: public, max-age=0, must-revalidate`; `/assets/*` gets
+  `max-age=31536000, immutable`.
+
+### Publish
+
+Netlify builds on every push to `main` and opens a deploy preview for every PR branch.
+There is no image, no registry and no signature to verify — the artifact is `dist/`,
+and the deploy records the commit that produced it.
+
+The one thing to internalise: **Netlify does not wait for GitHub Actions.** A push
+deploys whether or not `ci.yml` is green. The gate therefore lives at *merge*, not at
+*release* — make the five `ci.yml` jobs required status checks on `main`, and a broken
+change cannot land in the first place — see **Netlify setup** below for the command
+that writes those checks.
 
 ### Rollback
 
-Rolling back is a tag swap — the old image is still in the registry, untouched.
+Deploys are immutable and each keeps its own `dist/`, so a rollback is a pointer move,
+not a rebuild:
 
 ```bash
-IMAGE=ghcr.io/<owner>/<repo>:<previous-short-sha> \
-  docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --pull always
-
-docker compose ps            # STATUS should reach "running (healthy)"
-docker compose logs --tail 50 portfolio
+# UI: Deploys → pick a known-good deploy → ⋯ → Publish deploy to production
+# or, without touching the UI:
+git revert <bad-sha> && git push origin main   # the forward fix, still auditable
 ```
 
-### Scan locally, before you push
+The old deploy stays in the history either way, so nothing is ever lost by rolling back.
+
+### Verify the headers are actually enforced
 
 ```bash
-docker build -t portfolio:local .
-trivy image --severity CRITICAL,HIGH --ignore-unfixed portfolio:local
-```
-
-`--ignore-unfixed` matches CI policy: fail only on findings that have an upstream
-patch, so an unpatchable base CVE can't block a deploy you cannot fix.
-
-### Confirm the hardening is actually enforced
-
-```bash
-docker inspect -f '{{.Config.User}}' portfolio                  # 101:101
-docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' portfolio    # true
-docker inspect -f '{{json .HostConfig.CapDrop}}' portfolio      # ["ALL"]
-docker inspect -f '{{json .HostConfig.SecurityOpt}}' portfolio  # no-new-privileges
-docker inspect -f '{{.State.Health.Status}}' portfolio          # healthy
-curl -sI https://yourdomain.com/ | grep -i content-security-policy
+SITE=https://<your-site>.netlify.app
+curl -sI $SITE/ | grep -i content-security-policy
+curl -sI $SITE/ | grep -i strict-transport-security
+curl -sI $SITE/assets/<hashed>.js | grep -i cache-control
+curl -s -o /dev/null -w '%{http_code}\n' $SITE/any/deep/route   # 200, the SPA shell
+curl -s -o /dev/null -w '%{http_code}\n' $SITE/assets/nope.js   # 404, never HTML
 ```
 
 ### Monitoring
 
-Probe `https://yourdomain.com/healthz` — a static `200 ok` from nginx, independent of
-React rendering. Alert after **2 consecutive failures** to ride out a single restart.
-Uptime Kuma (self-hosted, one container) or any free BetterStack / UptimeRobot check
-both do the job.
+Probe `https://<your-site>.netlify.app/` — Netlify serves the built HTML, so a `200`
+says the edge is up and the deploy is current, independently of React rendering. Alert
+after **2 consecutive failures** to ride out a transient edge blip. Netlify's own status
+page plus any free BetterStack / UptimeRobot check both do the job.
 
 ## Pipelines
 
@@ -187,108 +175,59 @@ radius.
 | **secret scan (full history)** | gitleaks finds a credential in *any* commit — a key deleted later is still leaked |
 | **CodeQL (JS/TS + Actions)** | data-flow analysis flags the app source **or the workflow files themselves** (injection via `${{ }}` interpolation) |
 | **dependency advisories** | a PR introduces a vulnerable package or a license outside `allow-licenses`, `npm audit --omit=dev` reports High/Critical in the tree that actually ships, or an action pin doesn't match the commit its version comment names. Needs the repo's **dependency graph** enabled (Settings → Code, security and analysis) — npm has no client-side snapshot upload, so until GitHub's extractor has run, this job fails with the remedy printed in its summary |
-| **config + IaC scan** | Trivy finds a High/Critical misconfiguration in the Dockerfile, or either compose file fails to resolve against the schema |
+### The deploy is Netlify's, not ours
 
-### `docker.yml` — build → scan → sign → publish → release
+`docker.yml` (build → scan → sign → publish → release) is gone with the container it
+produced: there is no image to scan or sign and no VPS to SSH into. Netlify owns build
+and publish; this repository owns *whether a change is allowed to land*.
 
-| Job | Runs on | Does |
-| --- | --- | --- |
-| **build & smoke test (amd64)** | PRs | builds, starts the container under the production restrictions (non-root, read-only, `cap_drop ALL`), then asserts `/healthz`, the SPA deep-link fallback, CSP on every response shape, `immutable` on assets and `403` on dotfiles |
-| **multi-platform publish** | `main`, `v*` tags, weekly cron | pushes the immutable SHA tags, signs the digest with **keyless cosign** (Fulcio cert bound to this repo + file, recorded in Rekor), scans the pushed digest, uploads SARIF, and promotes `:main` / `:latest` / semver tags **only if the scan is clean** |
-| **release to production** | `v*` tags only | re-resolves the tag to a digest, `cosign verify` against the exact workflow identity, then SSHes to the VPS, pulls **by digest**, recreates the stack, and rolls back automatically if the health gate fails |
+That trade is worth stating plainly, because it does cost a control:
 
-The deploy job is wrapped in `environment: production`, so it can be made to wait for a
-manual approval (`node scripts/setup-security.mjs --reviewers <login> --apply`). Its
-`concurrency.group` is `production-deploy` with `cancel-in-progress: false` — a running
-release is never cancelled mid-swap.
+| Used to be enforced by | Enforced now by |
+| --- | --- |
+| Trivy gate before `:main` / `:latest` moved | `npm audit` + dependency review + Dependabot, at merge |
+| Keyless cosign signature over the digest | every deploy links back to the commit that built it |
+| Health-gated rollout with automatic rollback | Netlify's atomic deploys + one-click rollback |
+| `environment: production` human approval | branch protection: required checks + required review |
 
-The scan gate runs in `table` format deliberately. trivy-action's entrypoint clears
-`TRIVY_SEVERITY` for any `sarif` run so the uploaded report is complete — and that
-same filter is what drives `--exit-code`, so a sarif-shaped gate blocks on MEDIUM and
-UNKNOWN findings while printing nothing to the log. Gating (HIGH/CRITICAL, fixable
-only, printed) and reporting (every severity, never blocking) are separate steps.
+The last row is the one to actually turn on — see **Publish** above.
 
 ### Cutting a release
 
 ```bash
 npm run typecheck && npm run build   # local sanity first
 git tag -a v1.0.1 -m "release: …"
-git push origin main                 # gates + publish run
-git push origin v1.0.1               # publish → verify → deploy (approvals first)
+git push origin main                 # gates run, Netlify publishes
+git push origin v1.0.1               # the tag is just a ref on that same commit
 ```
 
-Rolling back a release does not need a new tag: the deploy job keeps the last known-good
-reference in `$DEPLOY_DIR/.previous_digest`. Put it back into `.env` as `IMAGE=` and run
-`docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --no-build --pull never`.
+Tags are for humans and for SemVer in the changelog — Netlify deploys the *commit*, not
+the tag, so a release is a push to `main` with a label on it. Nothing waits on the tag.
 
-## Server one-time setup
+## Netlify setup (one time)
 
-The VPS needs Docker + Compose v2, this repo's compose files and `deploy/` config, and
-nothing else — it never builds, so there is no node toolchain to install (and therefore
-no npm dependency on the server to exploit). The deploy job replaces **only** the
-`IMAGE=` line in `.env`; it never runs `git pull`, never builds, and never edits the
-checkout. So when a release changes the compose files, nginx config or Caddyfile, pull
-it on the server yourself:
+There is no server to provision. The whole setup is three steps, and none of them puts
+a secret in this repository:
 
-```bash
-git -C ~/portfolio pull --ff-only        # config change, then re-run the deploy
-```
-
-Run everything below as the unprivileged deploy user (`SSH_USER`), not root.
-
-```bash
-# 1. Let the deploy user drive Docker, then clone the ops files
-sudo usermod -aG docker $USER            # re-login afterwards
-git clone https://github.com/<owner>/<repo>.git ~/portfolio && cd ~/portfolio
-cp deploy/Caddyfile.example deploy/Caddyfile   # put the real hostname in
-
-# 2. Registry login so the pull works (or make the GHCR package public)
-printf '%s' "$PAT_read_packages" | docker login ghcr.io -u <github-login> --password-stdin
-
-# 3. .env is the single lever the deploy job moves; 600 because it sits next to config
-printf 'IMAGE=ghcr.io/<owner>/<repo>@sha256:<digest>\n' > .env
-chmod 600 .env
-
-# 4. Start once by hand, confirm the hardening, then seed the rollback pointer
-docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --pull always
-docker inspect -f '{{.State.Health.Status}}' portfolio        # healthy
-curl -fsSI https://yourdomain.com/ | grep -i content-security-policy
-cat .env | sed -n 's/^IMAGE=//p' > .previous_digest           # last known-good
-```
-
-Open only 22, 80 and 443 in the host firewall; 8080 stays private because the TLS
-overlay `!reset`s the published port and Caddy reaches the app over the compose network.
-
-Then in GitHub (**Settings → Secrets and variables → Actions**):
-
-| Secret | Value |
-| --- | --- |
-| `SSH_DEPLOY_KEY` | **private** half of a dedicated keypair added to the server's `authorized_keys` |
-| `SSH_HOST` | server address |
-| `SSH_USER` | the unprivileged deploy user (not root) |
-| `SSH_KNOWN_HOSTS` | output of `ssh-keyscan -t ed25519,rsa <host>` — the job refuses to connect without it |
-
-| Variable | Value |
-| --- | --- |
-| `DEPLOY_DIR` | e.g. `/home/<user>/portfolio` |
-| `SITE_URL` | e.g. `https://yourdomain.com` (health gate probes `<SITE_URL>/healthz`) |
-
-Generate the keypair locally and keep the private half off disk after pasting:
-
-```bash
-ssh-keygen -t ed25519 -f portfolio_deploy_key -N '' -C "github-actions-deploy"
-# public  → server:~/.ssh/authorized_keys   (restrict to the deploy command if you like)
-# private → GitHub secret SSH_DEPLOY_KEY
-ssh-keyscan -t ed25519,rsa <host>           # → GitHub secret SSH_KNOWN_HOSTS
-```
-
-Finally apply the repo-side settings (branch protection, push protection, environment
-gate) and read the policy:
+1. **Import the repo** — Netlify → *Add new site → Import an existing project* → GitHub
+   → this repository. `netlify.toml` already supplies the build command and the publish
+   directory, so accept them as shown; there is nothing to type in.
+2. **Custom domain** (optional) — attach it in Site settings. Netlify provisions and
+   renews TLS for it automatically, which is what replaced the Caddy edge.
+3. **Make the gates required**, so Netlify's deploy-on-push cannot outrun them:
 
 ```bash
 GITHUB_TOKEN=<pat> node scripts/setup-security.mjs          # dry run
 GITHUB_TOKEN=<pat> node scripts/setup-security.mjs --apply  # writes
 ```
 
-`.github/SECURITY.md` covers how to report a vulnerability and how anyone can verify
-that a digest was produced by this pipeline.
+That writes branch protection on `main` (required checks, required review, no
+force-push, linear history), enables secret scanning with push protection, turns on
+Dependabot security updates, and asserts `netlify.toml` still says `publish = "dist"`.
+
+**No repository secrets are required.** The old `SSH_*` secrets and `DEPLOY_DIR` /
+`SITE_URL` variables only describe machines you no longer run — delete them from
+**Settings → Secrets and variables → Actions** if they are still listed.
+
+`.github/SECURITY.md` covers how to report a vulnerability, and what still holds now
+that the container image is gone.

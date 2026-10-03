@@ -2,10 +2,11 @@
 /**
  * One-shot hardening of the GitHub repo settings that the pipelines assume.
  *
- * Dockerfile and nginx can enforce runtime security, but nothing inside the
- * repository can enforce *process* security: whether main is protected, whether
- * a secret can be pushed at all, whether production needs a human approval.
- * Those live in repo settings, so this script sets them through the REST API.
+ * Netlify enforces headers, TLS and caching at the edge, but nothing inside
+ * the repository can enforce *process* security: whether main is protected,
+ * whether a secret can be pushed at all, whether a change needs review before
+ * it merges. Those live in repo settings, so this script sets them through the
+ * REST API.
  *
  *   node scripts/setup-security.mjs              # dry run: prints every call
  *   node scripts/setup-security.mjs --apply      # makes the changes
@@ -16,7 +17,6 @@
  *
  * Flags:
  *   --repo owner/name        override auto-detection from `git remote`
- *   --reviewers login,login  who must approve a production deployment
  *   --checks a,b,c           required status contexts (default: ci.yml job names)
  */
 
@@ -33,10 +33,13 @@ const arg = (name) => {
 
 const API = 'https://api.github.com'
 
-// What docker.yml's deploy job reads. Missing any of these = a failed release,
-// so they are listed here and checked for real in step 4.
-const REQUIRED_SECRETS = ['SSH_DEPLOY_KEY', 'SSH_HOST', 'SSH_USER', 'SSH_KNOWN_HOSTS']
-const REQUIRED_VARIABLES = ['DEPLOY_DIR', 'SITE_URL']
+// Netlify builds and publishes straight from git, so the old VPS credentials
+// (SSH_*) and deploy variables (DEPLOY_DIR, SITE_URL) no longer exist to check:
+// there is no machine left in a datacentre to hold a key. Both lists stay
+// defined so step 4 still has one concrete place to declare what CI needs the
+// day a credential-backed deploy comes back.
+const REQUIRED_SECRETS = []
+const REQUIRED_VARIABLES = []
 
 const FALLBACK_CHECKS = [
   'typecheck + build',
@@ -44,7 +47,6 @@ const FALLBACK_CHECKS = [
   'secret scan (full history)',
   'CodeQL (JS/TS + Actions)',
   'dependency advisories',
-  'config + IaC scan',
 ]
 
 function detectRepo() {
@@ -199,35 +201,36 @@ async function main() {
   if (prot.status === 403) console.log('        (403 = needs admin rights; private repos also need GitHub Pro/Team for protection rules)')
   else if (prot.ok) console.log(`        required contexts: ${checks.join(', ')}`)
 
-  // ---- 3. production environment gate ---------------------------------------
-  // docker.yml's deploy job declares `environment: production`. Adding a required
-  // reviewer here makes a tagged release wait for a human even when every check
-  // is green — the one control that stops a compromised workflow self-deploying.
-  // No branch policy is set on purpose: the run ref is `refs/tags/v*`, which is
-  // not a protected branch, so a protected-branch policy would reject the very
-  // deployment this gate exists to approve.
-  console.log('\n3. Production environment')
-  let reviewers = []
-  for (const login of (arg('reviewers') || '').split(',').map((s) => s.trim()).filter(Boolean)) {
-    if (!TOKEN) {
-      console.log(`        (dry run: cannot resolve reviewer "${login}" without a token)`)
-      continue
+  // ---- 3. Netlify configuration --------------------------------------------
+  // The deploy is now "push to main", so what is worth asserting is that the
+  // file Netlify actually reads still says what the pipeline assumes: builds
+  // with the lockfile-strict command, publishes dist/. A publish-directory typo
+  // is invisible until the live site starts serving 404s or a stale bundle.
+  console.log('\n3. Netlify configuration')
+  try {
+    const toml = readFileSync('netlify.toml', 'utf8')
+    const publish = toml.match(/^\s*publish\s*=\s*"([^"]+)"/m)
+    const command = toml.match(/^\s*command\s*=\s*"([^"]+)"/m)
+    console.log(`  ${publish ? 'ok  ' : 'MISS'} publish = ${publish ? publish[1] : '(not declared)'}`)
+    console.log(`  ${command ? 'ok  ' : 'MISS'} command = ${command ? command[1] : '(not declared)'}`)
+    if (publish && publish[1] !== 'dist') {
+      console.log('        !! expected "dist" — vite.config.ts writes there and ci.yml asserts against it')
     }
-    const u = await gh('GET', `/users/${login}`)
-    if (u.ok) reviewers.push({ reviewer_type: 'User', id: u.json.id })
-    else console.log(`        !! cannot resolve user "${login}" (typo, or token lacks scope)`)
+    if (command && !/npm ci/.test(command[1])) {
+      console.log('        !! use `npm ci` so a drifted lockfile fails loudly instead of re-resolving')
+    }
+  } catch {
+    console.log('  MISS netlify.toml — Netlify has no build/publish configuration to read,')
+    console.log('       so it falls back to UI settings that this repo cannot review or diff.')
   }
-  await call(
-    `gate "production": ${reviewers.length ? `${reviewers.length} required reviewer(s)` : 'no reviewers configured (pass --reviewers login)'}`,
-    'PUT',
-    `/repos/${repo}/environments/production`,
-    { can_admins_bypass: false, wait_timer: 0, ...(reviewers.length ? { reviewers } : {}) },
-  )
 
   // ---- 4. deploy configuration presence -------------------------------------
-  // Names are public; values never are.
+  // Names are public; values never are. Netlify owns the deploy itself, so this
+  // is empty by design rather than missing — see the comment on the two lists.
   console.log('\n4. Deploy configuration present?')
-  if (TOKEN && APPLY) {
+  if (!REQUIRED_SECRETS.length && !REQUIRED_VARIABLES.length) {
+    console.log('  none required — Netlify builds and deploys from git with no repo secrets')
+  } else if (TOKEN && APPLY) {
     const secrets = await gh('GET', `/repos/${repo}/actions/secrets`)
     const vars = await gh('GET', `/repos/${repo}/actions/variables`)
     const have = new Set((secrets.json.secrets || []).map((s) => s.name))
@@ -267,7 +270,9 @@ async function main() {
 
   console.log('\nnext:')
   console.log('  1. Re-run with --apply to write these settings.')
-  console.log('  2. Add the SSH_* secrets and DEPLOY_DIR/SITE_URL variables (README “Server one-time setup”).')
+  console.log('  2. Connect this repo in Netlify: Add new site → Import an existing project.')
+  console.log('     netlify.toml already supplies the build command and publish directory,',
+    'so the UI has nothing left to get wrong.', '')
   console.log('  3. Settings → Actions → General → “Approve third-party actions” / self-hosted runners:')
   console.log('     keep default permissions on “Read” and let the per-job blocks in the workflows grant more.')
   if (unpinned) console.log('  4. Pin the actions listed above before trusting any run of these workflows.')

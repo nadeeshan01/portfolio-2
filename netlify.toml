@@ -1,0 +1,108 @@
+# ============================================================================
+# Netlify — build + routing + headers for the static Vite bundle.
+#
+# This file replaces the deleted Docker layer (deploy/nginx.conf +
+# deploy/security-headers.conf). Everything the nginx server block did that
+# still matters on a CDN is reproduced below, and nothing else is invented.
+#
+# Netlify model, for the record:
+#   * build + deploy happen here, on every push to main
+#   * headers/redirects are read AFTER the build, from this file
+#   * redirects are evaluated top-down, FIRST MATCH WINS — but an existing
+#     file always wins over a rule (force = false), which is what lets the
+#     /assets/ 404 guard sit above the SPA fallback without shadowing real
+#     bundles
+#   * header `*` is a "rest of path" match and may only end a pattern, so
+#     `/assets/*.js` would silently degrade to `/assets/*`. Use full-segment
+#     wildcards only.
+#   * ALL matching [[headers]] blocks apply, so `/*` and `/assets/*` both fire
+#     for a bundle request. `/*` is listed first on purpose: if the ordering
+#     ever mattered, losing a cache hint is harmless, losing a security header
+#     is not.
+# ============================================================================
+
+[build]
+  # `npm ci`, not `npm install`: a drifted lockfile must fail loudly rather
+  # than silently re-resolve — same rule as the GitHub Actions build job.
+  # `npm run build` is `tsc -b && vite build`, so typechecking gates the
+  # deploy too.
+  command = "npm ci --no-audit --no-fund && npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+
+# ----------------------------------------------------------------------------
+# Redirects — first match wins, existing files served first.
+# ----------------------------------------------------------------------------
+
+# Guard, not decoration: a hashed bundle that no longer exists must stay a 404
+# instead of falling through to the SPA shell below. Returning index.html with
+# a 200 for a missing .js would hand the browser HTML to parse as JavaScript —
+# the exact failure the old container smoke test asserted against. This never
+# fires for a real bundle, because an existing file beats a non-forced rule.
+[[redirects]]
+  from = "/assets/*"
+  to = "/index.html"
+  status = 404
+
+# SPA fallback. Status 200 (a rewrite, not a redirect) so deep links keep
+# their URL for the client router to read. Must stay LAST.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+
+# ----------------------------------------------------------------------------
+# Security headers — verbatim port of deploy/security-headers.conf.
+# ----------------------------------------------------------------------------
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "SAMEORIGIN"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+    # Camera / mic / geolocation are never needed by a static folio.
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), interest-cohort=(), payment=()"
+
+    # CSP is byte-identical to the nginx snippet:
+    #   script-src 'self'          — Vite emits external bundles only
+    #   style-src 'unsafe-inline'  — Tailwind's inline style block
+    #   fonts.googleapis/gstatic   — the one cross-origin pair the page loads
+    #   img-src data:              — the paper-grain background in src/index.css
+    #   portrait.jpg is same-origin, so no third-party image host is listed
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+
+    Cross-Origin-Resource-Policy = "same-origin"
+    Cross-Origin-Opener-Policy = "same-origin"
+    X-XSS-Protection = "0"
+
+    # HSTS was deliberately OFF in nginx because the Caddy edge already sent
+    # it. There is no edge of our own any more — Netlify terminates TLS and
+    # sets no HSTS of its own — so this is the one header that changes value
+    # rather than simply moving.
+    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
+
+    # index.html is the deploy manifest: it must never be cached long, or a
+    # release leaves visitors pinned to a bundle a previous deploy has since
+    # dropped. Netlify's default is already conservative; this makes the
+    # intent explicit instead of inherited.
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+
+# ----------------------------------------------------------------------------
+# Hashed bundles — the only long-lived cache in the system.
+# ----------------------------------------------------------------------------
+# Filenames change on every content change (/assets/index-a1b2c3.js), so a
+# year of immutable caching is safe and lets the browser skip revalidation.
+# Deliberately does NOT repeat the security headers: all matching blocks
+# apply, so they are already carried by the `/*` rule above, and re-declaring
+# Cache-Control here is the only reason this block is listed second.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

@@ -1,8 +1,9 @@
 # Security Policy
 
-This repository ships a static React bundle from an unprivileged nginx container, deployed to a
-single VPS. The attack surface is small, and the goal of this policy is to keep it that way: what
-runs in production must be built here, scanned here, signed here, and verified before it lands.
+This repository ships a static React bundle, built and published by Netlify straight from `main`.
+There is no container, no registry and no server of our own to defend — the attack surface is a
+build pipeline and a CDN. The goal of this policy is to keep it that way: what runs in production
+must be built from this repository's source, under gates a change has to clear before it merges.
 
 ## Reporting a vulnerability
 
@@ -23,71 +24,66 @@ a silent close.
 
 | In scope | Typically out of scope |
 | --- | --- |
-| The published container image and its supply chain | Vulnerabilities in third-party bases with no upstream fix (tracked, not blocked — see Trivy policy) |
-| `deploy/nginx.conf`, `deploy/security-headers.conf`, `deploy/Caddyfile.example` | Social engineering, phishing, credential stuffing against the contact form (it is static — it submits nowhere) |
+| `netlify.toml` — build command, publish directory, SPA rewrite, security headers | Vulnerabilities in Netlify's own platform or CDN (theirs to own, tracked but not ours) |
+| Response headers as actually served — CSP, HSTS, frame-ancestors, caching | Social engineering, phishing, credential stuffing against the contact form (it is static — it submits nowhere) |
 | `.github/workflows/*.yml` (injection, privilege escalation, unpinned actions) | DNS / registrar / Cloudflare account issues |
 | Secrets committed to git history | Automated scanning of the live site without prior agreement |
 | Client-side code that leaks or mishandles data | Missing features, dependency version freshness on its own |
 
 ## How the pipeline protects production
 
-The release path is `tag → build → scan → sign → verify → deploy-by-digest → health gate`.
+The release path is `push → gates → merge → Netlify build → atomic deploy`.
 
-1. **CI gates** (`.github/workflows/ci.yml`) — strict TypeScript, a real production build,
-   a headless-Chrome render check, CodeQL over both the app source and the workflow files,
-   gitleaks across **full git history**, `npm audit` on the production tree, a check that
-   every pinned action SHA still matches the tag its comment names, a Trivy misconfig scan
-   of the Dockerfile, and a schema resolve of both compose files.
-2. **Image scan before promotion** (`docker.yml`) — the immutable SHA-tagged build is scanned with
-   Trivy at `CRITICAL,HIGH`; the moving `:main` / `:latest` tags are only promoted if that scan is
-   clean, so a rejected image can never be what `:latest` points at.
-3. **Keyless signing** — the pushed digest is signed with cosign using the workflow's OIDC identity
-   (`this repo` + `docker.yml`). There is no stored private key to steal.
-4. **Verification before deploy** — the deploy job re-resolves the release tag to a **digest**, then
-   requires `cosign verify` to match that exact identity and issuer, and refuses to connect to the
-   server unless `SSH_KNOWN_HOSTS` pins the host key (fail closed, no TOFU).
-5. **Immutable pull** — the server pulls by digest with `--pull never --no-build`; nothing on the
-   host compiles or re-tags anything.
-6. **Health-gated rollback** — the container must report `healthy` and `$SITE_URL/healthz` must
-   answer before the new digest is recorded; otherwise the previous digest is restored
-   automatically.
-7. **Runtime restrictions** — UID `101:101`, `cap_drop: ALL`, `no-new-privileges`, read-only root
-   filesystem with only `tmpfs` for nginx's scratch paths, CPU/memory/PID limits, and access logs
-   capped and rotated.
-8. **Response headers** — CSP, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
-   `Permissions-Policy`, COOP/CORP and HSTS are set in `deploy/security-headers.conf`; the CI and
-   PR smoke steps assert they survive on every response shape (root, hashed asset, deep link).
+1. **The gate is at merge, not at deploy.** Netlify publishes on push and does **not** wait for
+   CI — so `main` carries *required status checks* plus a required review. A change that fails a
+   gate cannot land, and therefore cannot ship. In the current design this is the single most
+   important control, and `node scripts/setup-security.mjs --apply` is what writes it.
+2. **CI gates** (`.github/workflows/ci.yml`) — strict TypeScript and a real production build, a
+   headless-Chrome render check over the *built* bundle at four viewport widths, CodeQL over both
+   the app source and the workflow files themselves, gitleaks across **full git history**,
+   `npm audit` on the production tree, a dependency licence and advisory review on every PR, and
+   a check that every pinned action SHA still matches the tag its comment names.
+3. **Build isolation** — Netlify builds in a clean ephemeral environment from the committed
+   lockfile (`npm ci`), so the artifact is a function of the commit and nothing else. There is no
+   long-lived build host whose state could leak into a release.
+4. **Atomic deploys and rollback** — a deploy swaps the whole site at once, so a visitor never
+   sees a half-old, half-new bundle. Every previous deploy is retained and can be republished in
+   one step, and each deploy records the revision it built.
+5. **Supply chain** — every third-party GitHub Action is pinned to a full commit SHA carrying a
+   version comment that `scripts/pins.mjs` verifies against upstream, so a retagged release cannot
+   change what the pipeline runs. Dependabot keeps both the npm tree and those pins moving.
+6. **Secrets** — no deploy credential exists in this repository. Secret scanning with push
+   protection runs on every push, so a leaked key is rejected before the commit is accepted.
+7. **Response headers** — CSP, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
+   `Permissions-Policy`, COOP/CORP and HSTS are declared in `netlify.toml` and served by the CDN
+   on every response shape: document, hashed asset and deep link alike.
 
-Dependencies are refreshed by Dependabot (`.github/dependabot.yml`), which also maintains the
-digest pins on base images and the SHA pins on every third-party action.
+## Verifying what you are served
 
-## Verifying an image you pulled
-
-Anyone can confirm a digest came from this repository's pipeline:
+There is no image digest to verify any more. What you can verify is that the response carries
+this repository's policy rather than a default, and that the build behind it is a commit you can
+read:
 
 ```bash
-cosign verify \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  --certificate-identity-regexp '^https://github\.com/nadeeshan01/portfolio-2/\.github/workflows/docker\.yml@refs/(heads/main|tags/v\..*)$' \
-  ghcr.io/nadeeshan01/portfolio-2@sha256:<digest>
+SITE=https://<your-site>.netlify.app
+curl -sI $SITE/ | grep -i content-security-policy      # this repo's CSP, not a bare default
+curl -sI $SITE/ | grep -i strict-transport-security
+curl -s -o /dev/null -w '%{http_code}\n' $SITE/any/deep/route   # 200, the SPA shell
+curl -s -o /dev/null -w '%{http_code}\n' $SITE/assets/nope.js   # 404, never HTML
 ```
 
-Also check the SLSA provenance and SBOM attached to the same digest:
-
-```bash
-slsa-verifier verify-image ghcr.io/nadeeshan01/portfolio-2@sha256:<digest> \
-  --source-uri github.com/nadeeshan01/portfolio-2
-trivy image --severity CRITICAL,HIGH --ignore-unfixed ghcr.io/nadeeshan01/portfolio-2@sha256:<digest>
-```
+Every Netlify deploy links to the revision it built, so the line from what you are looking at to
+a commit in this history needs no signature to follow — only the deploy page and `git log`.
 
 ## Secrets and supported versions
 
-- Only CI **artifacts** may carry a build; secrets live in GitHub Actions secrets/variables, never
-  in `.env` committed to the repo (`.env*` is git-ignored, `.env.example` is the template).
-- The server's `.env` is `chmod 600` and rewritten only by the deploy job's `IMAGE=` line.
-- `node scripts/setup-security.mjs` re-applies branch protection, scanning settings and the
-  `production` environment gate, and reports any missing required secret by name.
+- No deploy credential is stored in this repository or in GitHub Actions — Netlify authenticates
+  to GitHub through its own app installation, scoped to this repository.
+- `.env*` stays git-ignored, and nothing in the build reads a secret at runtime: the shipped
+  artifact is a static bundle with no server-side code to hand one to.
+- `node scripts/setup-security.mjs` re-applies branch protection, secret scanning and push
+  protection, and re-checks that `netlify.toml` still declares the build Netlify runs.
 
-Security fixes are shipped by tagging a new release (`v*`); the deployed digest is recorded in the
-release's deploy job log. Older image tags stay pullable for forensics — roll forward rather than
-relying on an unpatched `:latest`.
+Security fixes ship the way everything else does: merge to `main` and let Netlify publish. Every
+previous deploy is retained, so a bad release rolls back to an exact earlier deploy rather than
+being patched forward under pressure.

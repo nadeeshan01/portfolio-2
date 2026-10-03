@@ -1,15 +1,18 @@
 name: ci
 
 # ============================================================================
-# Every pull request and every push to main must clear these gates before the
-# deploy job in docker.yml is allowed to touch production.
+# Every pull request and every push to main must clear these gates.
 #
+# NOTE on where the gate now lives: Netlify builds and publishes on push,
+# independently of these checks — a red run here does not stop a deploy.
+# These jobs are what keep a broken change from *merging*; make them required
+# status checks on main (scripts/setup-security.mjs sets that up) and the
+# effect is the same as a blocking deploy job, without CI owning the release.
 # Security layers here, in rough order of how often they catch things:
 #   secret-scan  gitleaks over full git history — leaked keys can't be un-leaked
 #   sast         CodeQL data-flow analysis over JS/TS and the workflow files
 #   deps         advisory check on changed requirements + prod-only npm audit
 #                plus a check that every action pin matches its version comment
-#   iaC          Trivy misconfig scan of the Dockerfile + compose schema check
 #   build        strict TypeScript, then a real production bundle
 #   site-audit   the built page rendered in Chrome at 4 widths, failing on
 #                console errors, thrown errors and horizontal overflow
@@ -72,7 +75,8 @@ jobs:
           # A hashed JS + CSS chunk must exist, or the image would serve a blank page.
           find dist/assets -name '*.js' | grep -q .
           find dist/assets -name '*.css' | grep -q .
-          # public/ must have been copied in (the Dockerfile has to COPY it too).
+          # public/ must have been copied in — Netlify serves dist/ verbatim, so
+          # anything missing here is missing from the deployed site as well.
           # The dev server masks a missing file here; a browser tab just shows a
           # blank icon, so assert it in the artifact instead.
           test -f dist/portrait.jpg
@@ -267,38 +271,3 @@ jobs:
       # running someone else's code with `packages: write`.
       - name: Verify action pins
         run: node scripts/pins.mjs --quiet
-
-  # --------------------------------------------------------------------------
-  # Configuration-layer checks: the misconfig scanner's view of the build files,
-  # plus a compose schema resolve. Compose typos are invisible until `up` fails
-  # on the production host, which is exactly when you least want to meet them.
-  # (Trivy's misconfig DB covers Dockerfiles and k8s/Terraform; it does not read
-  # compose or nginx, so the schema resolve below is what covers compose.)
-  iaC:
-    name: config + IaC scan
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read   # report only — findings print to the job log
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Validate compose schema (base + TLS overlay)
-        run: |
-          set -euo pipefail
-          docker compose -f docker-compose.yml config --quiet
-          docker compose -f docker-compose.yml -f docker-compose.tls.yml config --quiet
-
-      # No `ignore-unfixed` here: that flag belongs to vulnerability scanning.
-      # `trivy config` rejects it outright ("unknown flag"), which would fail
-      # this job with a usage error instead of a finding.
-      - name: Scan build configuration for misconfigurations
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          version: v0.74.0   # one Trivy release across every job in the pipeline
-          scan-type: config
-          scan-ref: .
-          exit-code: '1'
-          severity: HIGH,CRITICAL
-          format: table
-          trivyignores: .trivyignore
