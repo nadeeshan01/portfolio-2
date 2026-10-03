@@ -1,0 +1,310 @@
+@import 'tailwindcss';
+
+/* ============================================================
+   TECHNICAL PLATE & EDITORIAL FOLIO
+   Ink on warm, unbleached cotton rag paper.
+   ============================================================ */
+@theme {
+  /* --- Palette ------------------------------------------------ */
+  --color-ground: #f4ebdd;
+  --color-ground-deep: #ece0cd;
+  --color-plate: #fff7ea;
+  --color-ink: #141414;
+  --color-ink-2: #2b2b2b;
+  --color-muted: #5b5b5b;
+  --color-hairline: #e6d8c6;
+  --color-hairline-2: #d6c4ac;
+  --color-terracotta: #e15a3b;
+  --color-terracotta-deep: #b8401f;
+  --color-patina: #2e6f5e;
+  --color-patina-deep: #1d5044;
+
+  /* --- Typography --------------------------------------------- */
+  --font-display: 'Playfair Display', Georgia, 'Times New Roman', serif;
+  --font-body: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --text-display: 3.5rem;
+  --text-display--line-height: 4rem;
+  --text-display--letter-spacing: -0.02em;
+  --text-display--font-weight: 600;
+
+  --text-display-m: 2.375rem;
+  --text-display-m--line-height: 2.75rem;
+  --text-display-m--letter-spacing: -0.01em;
+  --text-display-m--font-weight: 600;
+
+  --text-headline-lg: 2.5rem;
+  --text-headline-lg--line-height: 3rem;
+  --text-headline-lg--letter-spacing: -0.01em;
+  --text-headline-lg--font-weight: 600;
+
+  --text-headline-lg-m: 1.75rem;
+  --text-headline-lg-m--line-height: 2.25rem;
+
+  --text-headline-md: 1.75rem;
+  --text-headline-md--line-height: 2.25rem;
+  --text-headline-md--font-weight: 500;
+
+  --text-headline-sm: 1.375rem;
+  --text-headline-sm--line-height: 1.75rem;
+  --text-headline-sm--font-weight: 500;
+
+  --text-body-lg: 1.0625rem;
+  --text-body-lg--line-height: 1.75rem;
+  --text-body-lg--letter-spacing: -0.01em;
+
+  --text-body-md: 0.9375rem;
+  --text-body-md--line-height: 1.5rem;
+
+  --text-body-sm: 0.8125rem;
+  --text-body-sm--line-height: 1.25rem;
+
+  --text-label-lg: 0.8125rem;
+  --text-label-lg--line-height: 1.125rem;
+  --text-label-lg--letter-spacing: 0.06em;
+  --text-label-lg--font-weight: 500;
+
+  --text-label-md: 0.6875rem;
+  --text-label-md--line-height: 1rem;
+  --text-label-md--letter-spacing: 0.08em;
+  --text-label-md--font-weight: 500;
+
+  --text-label-sm: 0.625rem;
+  --text-label-sm--line-height: 0.875rem;
+  --text-label-sm--letter-spacing: 0.12em;
+  --text-label-sm--font-weight: 600;
+
+  /* --- Motion -------------------------------------------------- */
+  --animate-marquee: marquee 46s linear infinite;
+  --animate-pip: pip 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-blink: blink 1.05s steps(1, end) infinite;
+  --animate-float: float 8s ease-in-out infinite;
+  --animate-sway: sway 9s ease-in-out infinite;
+  --animate-flow: flow 1.5s linear infinite;
+
+  @keyframes marquee {
+    from {
+      transform: translate3d(0, 0, 0);
+    }
+    to {
+      transform: translate3d(-50%, 0, 0);
+    }
+  }
+
+  @keyframes pip {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.35;
+      transform: scale(0.82);
+    }
+  }
+
+  @keyframes blink {
+    0%,
+    49% {
+      opacity: 1;
+    }
+    50%,
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes float {
+    0%,
+    100% {
+      transform: translate3d(0, 0, 0);
+    }
+    50% {
+      transform: translate3d(0, -10px, 0);
+    }
+  }
+
+  @keyframes sway {
+    0%,
+    100% {
+      transform: rotate(-1.6deg);
+    }
+    50% {
+      transform: rotate(1.4deg);
+    }
+  }
+}
+
+/* Travelling registration mark used by the architecture connectors */
+@keyframes flow {
+  0% {
+    top: -4px;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    top: calc(100% + 2px);
+    opacity: 0;
+  }
+}
+
+/* ============================================================
+   BASE
+   ============================================================ */
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--color-hairline);
+  }
+
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 6rem;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-ground);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overscroll-behavior-y: none;
+  }
+
+  /* Archival paper tooth — a fixed, blended grain layer */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    pointer-events: none;
+    opacity: 0.16;
+    mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  ::selection {
+    background: var(--color-ink);
+    color: var(--color-plate);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--color-ground-deep);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-hairline-2);
+    border: 2px solid var(--color-ground-deep);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-muted);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-terracotta);
+    outline-offset: 2px;
+  }
+
+  input,
+  textarea,
+  button {
+    font-family: inherit;
+  }
+}
+
+/* ============================================================
+   COMPONENTS
+   ============================================================ */
+@layer components {
+  /* Pale grid backdrop for blueprint panels */
+  .blueprint {
+    background-image:
+      linear-gradient(to right, rgba(20, 20, 20, 0.055) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(20, 20, 20, 0.055) 1px, transparent 1px);
+    background-size: 34px 34px;
+    background-position: center center;
+  }
+
+  /* Unblurred, hand-stamped bookplate cast */
+  .stamp {
+    transition:
+      box-shadow 0.24s cubic-bezier(0.16, 1, 0.3, 1),
+      transform 0.24s cubic-bezier(0.16, 1, 0.3, 1),
+      background-color 0.24s ease,
+      border-color 0.24s ease,
+      color 0.24s ease;
+  }
+  .stamp:hover {
+    box-shadow: 3px 3px 0 0 var(--color-ink);
+    transform: translate(-2px, -2px);
+  }
+  .stamp:active {
+    box-shadow: 0 0 0 0 var(--color-ink);
+    transform: translate(0, 0);
+  }
+
+  .stamp-accent:hover {
+    box-shadow: 3px 3px 0 0 var(--color-terracotta);
+  }
+
+  /* Engraved inset — terminal logs, metrics, code */
+  .inset {
+    background-color: var(--color-ground);
+    border: 1px solid var(--color-hairline);
+  }
+
+  /* Running dashed rule used between plate headers */
+  .dash-rule {
+    background-image: repeating-linear-gradient(
+      to right,
+      var(--color-hairline-2) 0 6px,
+      transparent 6px 12px
+    );
+    height: 1px;
+  }
+
+  .vertical-rl {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+  }
+
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Hide scrollbar on horizontal rails without losing scroll */
+  .no-bar {
+    scrollbar-width: none;
+  }
+  .no-bar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* ============================================================
+   REDUCED MOTION
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
