@@ -206,18 +206,26 @@ the tag, so a release is a push to `main` with a label on it. Nothing waits on t
 
 ## Netlify setup (one time)
 
-There is no server to provision. The whole setup is three steps, and none of them puts
+There is no server to provision. The whole setup is a few steps, and none of them puts
 a secret in this repository:
 
 1. **Import the repo** — Netlify → *Add new site → Import an existing project* → GitHub
    → this repository. `netlify.toml` already supplies the build command and the publish
    directory, so accept them as shown; there is nothing to type in.
-2. **Enable form detection** — Netlify → *Forms → Enable form detection*, then redeploy
-   (the form only registers on a deploy that happens *after* detection is on). The contact
-   form is client-rendered, so `index.html` carries a hidden static copy for the build-time
-   parser and `src/components/Contact.tsx` POSTs url-encoded submissions to `/`. Submissions
-   appear under *Forms* in the dashboard; add an email notification there (e.g. to your own
-   address) to get pinged on new submissions. Free tier: 100 submissions/month.
+2. **Point the contact form at Web3Forms** — submissions go to Web3Forms, not
+   Netlify Forms:
+   1. Get an access key at [web3forms.com](https://web3forms.com) — “Get Access
+      Key”, sign in with the inbox that should receive submissions, copy the
+      key. It is a public, browser-safe key: it is meant to ship in frontend
+      code, and Web3Forms enforces rate limits and origin checks server side.
+   2. Netlify → *Site configuration → Environment variables → Add a variable*:
+      `VITE_WEB3FORMS_KEY` = that key. (Local dev: copy `.env.example` to
+      `.env` and fill it in — `.env` is gitignored and must never be committed.)
+   3. **Deploy → Trigger deploy → Deploy without cache** — Vite inlines `VITE_*`
+      vars at build time, so the key only exists in a build made after the
+      variable is set.
+   4. Submit the form on the live site: the success panel appears and the
+      submission shows up in the Web3Forms dashboard (and in your inbox).
 3. **Custom domain** (optional) — attach it in Site settings. Netlify provisions and
    renews TLS for it automatically, which is what replaced the Caddy edge.
 4. **Make the gates required**, so Netlify's deploy-on-push cannot outrun them:

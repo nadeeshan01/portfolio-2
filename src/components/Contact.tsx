@@ -31,22 +31,34 @@ export default function Contact() {
     if (status === 'sending') return
     setStatus('sending')
 
-    // Netlify Forms: build-time detection registers the hidden copy in
-    // index.html; submissions are plain url-encoded POSTs to any path (JSON
-    // is not supported). form-name picks the form, `reason` carries the
-    // topic chips, and the bot-field honeypot is discarded server-side.
-    const body = new URLSearchParams()
-    body.set('form-name', 'contact')
-    new FormData(e.currentTarget).forEach((value, key) => {
-      if (typeof value === 'string') body.set(key, value)
+    // Web3Forms: JSON POST to the public submit endpoint, with the access key
+    // injected at build time via VITE_WEB3FORMS_KEY (set in the Netlify UI).
+    // 2xx marks it sent; a missing key, non-2xx reply, or network failure all
+    // land in the catch below and raise the existing error banner + mailto
+    // fallback. `reason` carries the topic chips; the honeypot value is passed
+    // as Web3Forms' `botcheck` spam field.
+    const data = new FormData(e.currentTarget)
+    const field = (name: string) => String(data.get(name) ?? '')
+    const name = field('name')
+    const body = JSON.stringify({
+      access_key: import.meta.env.VITE_WEB3FORMS_KEY,
+      name,
+      email: field('email'),
+      reason: topics.join(', '),
+      message: field('message'),
+      subject: `Portfolio contact from ${name}`,
+      from_name: 'Portfolio Contact Form',
+      botcheck: field('bot-field'),
     })
-    body.set('reason', topics.join(', '))
 
     try {
-      const res = await fetch('/', {
+      const res = await fetch('https://api.web3forms.com/submit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString(),
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body,
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setStatus('sent')

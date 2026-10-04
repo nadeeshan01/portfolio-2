@@ -27,22 +27,6 @@
   <body>
     <div id="root"></div>
 
-    <!--
-      Netlify form detection parses this file at deploy time — it cannot see
-      the React-rendered form in src/components/Contact.tsx. This hidden copy
-      registers the form; its input names must stay in sync with the JSX one.
-      On a successful deploy Netlify strips the data-netlify attribute and
-      injects the hidden form-name input itself.
-    -->
-    <form name="contact" method="POST" data-netlify="true" netlify-honeypot="bot-field" hidden>
-      <input type="hidden" name="form-name" value="contact" />
-      <input type="text" name="bot-field" />
-      <input type="text" name="name" />
-      <input type="email" name="email" />
-      <input type="text" name="reason" />
-      <textarea name="message"></textarea>
-    </form>
-
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

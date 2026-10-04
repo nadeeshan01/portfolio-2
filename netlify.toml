@@ -69,13 +69,15 @@
     # Camera / mic / geolocation are never needed by a static folio.
     Permissions-Policy = "camera=(), microphone=(), geolocation=(), interest-cohort=(), payment=()"
 
-    # CSP is byte-identical to the nginx snippet:
+    # CSP ported from the nginx snippet (one addition: connect-src gained
+    # api.web3forms.com when the contact form moved to Web3Forms — the
+    # public submit endpoint, which takes only the browser-safe access key):
     #   script-src 'self'          — Vite emits external bundles only
     #   style-src 'unsafe-inline'  — Tailwind's inline style block
     #   fonts.googleapis/gstatic   — the one cross-origin pair the page loads
     #   img-src data:              — the paper-grain background in src/index.css
     #   portrait.jpg is same-origin, so no third-party image host is listed
-    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.web3forms.com; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
 
     Cross-Origin-Resource-Policy = "same-origin"
     Cross-Origin-Opener-Policy = "same-origin"
