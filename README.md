@@ -212,9 +212,15 @@ a secret in this repository:
 1. **Import the repo** — Netlify → *Add new site → Import an existing project* → GitHub
    → this repository. `netlify.toml` already supplies the build command and the publish
    directory, so accept them as shown; there is nothing to type in.
-2. **Custom domain** (optional) — attach it in Site settings. Netlify provisions and
+2. **Enable form detection** — Netlify → *Forms → Enable form detection*, then redeploy
+   (the form only registers on a deploy that happens *after* detection is on). The contact
+   form is client-rendered, so `index.html` carries a hidden static copy for the build-time
+   parser and `src/components/Contact.tsx` POSTs url-encoded submissions to `/`. Submissions
+   appear under *Forms* in the dashboard; add an email notification there (e.g. to your own
+   address) to get pinged on new submissions. Free tier: 100 submissions/month.
+3. **Custom domain** (optional) — attach it in Site settings. Netlify provisions and
    renews TLS for it automatically, which is what replaced the Caddy edge.
-3. **Make the gates required**, so Netlify's deploy-on-push cannot outrun them:
+4. **Make the gates required**, so Netlify's deploy-on-push cannot outrun them:
 
 ```bash
 GITHUB_TOKEN=<pat> node scripts/setup-security.mjs          # dry run

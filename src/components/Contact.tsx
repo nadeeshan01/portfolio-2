@@ -18,7 +18,7 @@ const fieldClass =
 
 export default function Contact() {
   const reduce = useReducedMotion()
-  const [sent, setSent] = useState(false)
+  const [status, setStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle')
   const [topics, setTopics] = useState<string[]>(['Project inquiry'])
 
   const toggleTopic = (topic: string) =>
@@ -26,10 +26,34 @@ export default function Contact() {
       prev.includes(topic) ? prev.filter((t) => t !== topic) : [...prev, topic],
     )
 
-  const onSubmit = (e: FormEvent<HTMLFormElement>) => {
+  const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    setSent(true)
-    window.setTimeout(() => setSent(false), 4200)
+    if (status === 'sending') return
+    setStatus('sending')
+
+    // Netlify Forms: build-time detection registers the hidden copy in
+    // index.html; submissions are plain url-encoded POSTs to any path (JSON
+    // is not supported). form-name picks the form, `reason` carries the
+    // topic chips, and the bot-field honeypot is discarded server-side.
+    const body = new URLSearchParams()
+    body.set('form-name', 'contact')
+    new FormData(e.currentTarget).forEach((value, key) => {
+      if (typeof value === 'string') body.set(key, value)
+    })
+    body.set('reason', topics.join(', '))
+
+    try {
+      const res = await fetch('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setStatus('sent')
+      window.setTimeout(() => setStatus('idle'), 4200)
+    } catch {
+      setStatus('error')
+    }
   }
 
   return (
@@ -96,7 +120,7 @@ export default function Contact() {
             {/* ------------ form column ------------ */}
             <div className="p-6 sm:p-8 lg:col-span-7">
               <AnimatePresence mode="wait">
-                {sent ? (
+                {status === 'sent' ? (
                   <motion.div
                     key="sent"
                     initial={reduce ? { opacity: 1 } : { opacity: 0, scale: 0.96, rotate: -2 }}
@@ -127,6 +151,8 @@ export default function Contact() {
                     exit={{ opacity: 0 }}
                     className="space-y-5"
                   >
+                    {/* Kept in sync with the hidden detection form in index.html. */}
+                    <input type="hidden" name="form-name" value="contact" />
                     <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
                       <div className="space-y-2">
                         <label
@@ -218,12 +244,31 @@ export default function Contact() {
                       />
                     </div>
 
+                    {/* Honeypot: invisible to people, tempting to bots.
+                        Netlify drops the submission if it is filled in. */}
+                    <div className="absolute -left-[9999px] h-px w-px overflow-hidden" aria-hidden="true">
+                      <label htmlFor="bot-field">Do not fill this out</label>
+                      <input id="bot-field" name="bot-field" type="text" tabIndex={-1} autoComplete="off" />
+                    </div>
+
+                    {status === 'error' && (
+                      <p role="alert" className="border border-terracotta bg-terracotta/5 px-4 py-3 text-body-sm text-ink">
+                        Dispatch failed — the intake endpoint did not accept the message. Please
+                        email{' '}
+                        <a className="underline underline-offset-2 hover:text-terracotta" href={`mailto:${IDENTITY.email}`}>
+                          {IDENTITY.email}
+                        </a>{' '}
+                        directly.
+                      </p>
+                    )}
+
                     <div className="flex flex-wrap items-center gap-4 pt-1">
                       <button
                         type="submit"
-                        className="stamp stamp-accent inline-flex items-center gap-2 border border-terracotta bg-terracotta px-7 py-3.5 font-mono text-label-md font-medium uppercase tracking-[0.16em] text-plate"
+                        disabled={status === 'sending'}
+                        className="stamp stamp-accent inline-flex items-center gap-2 border border-terracotta bg-terracotta px-7 py-3.5 font-mono text-label-md font-medium uppercase tracking-[0.16em] text-plate disabled:cursor-wait disabled:opacity-70"
                       >
-                        Send message
+                        {status === 'sending' ? 'Sending…' : 'Send message'}
                         <Send className="h-4 w-4" strokeWidth={2} />
                       </button>
                       <span className="font-mono text-label-sm uppercase tracking-[0.14em] text-muted">
