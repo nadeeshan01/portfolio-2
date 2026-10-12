@@ -10,8 +10,8 @@
     "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
-    "framer-motion": "^12.23.12",
-    "lucide-react": "^1.50.0",
+    "framer-motion": "^14.0.0",
+    "lucide-react": "^1.54.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
